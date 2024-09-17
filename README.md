@@ -1,1 +1,1 @@
-#just a simple calculator that adds the sum of two numbers
+#This is just to show the projects I have worked on while in college these are not refined by any means and if any changes are needed I will revist them in the future when I have a more solid understanding on Python.

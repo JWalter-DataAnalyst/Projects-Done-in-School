@@ -1,20 +1,18 @@
 import os
 import math
+import time
 import pandas as pd
 import folium
 from folium.plugins import HeatMap, MarkerCluster
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
-from tqdm import tqdm
-import geopandas as gpd
-from shapely.geometry import Point
-import fiona
+import tkinter as tk
+from tkinter import ttk, messagebox
 
 # ========= FILES =========
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_PATH = os.path.join(BASE_DIR, "Utoledo Call Log.xlsx")
-OUTPUT_HTML = os.path.join(BASE_DIR, "crime_map.html")
-GDB_PATH = os.path.join(BASE_DIR, "LucasCounty.gdb")   # <-- your geodatabase folder
+OUTPUT_HTML = os.path.join(BASE_DIR, "Utoledo_HeatMap.html")
 SHEET_NAME = 0
 # =========================
 
@@ -32,35 +30,49 @@ def geocode_addresses(df, address_col="location"):
     if "longitude" not in df.columns:
         df["longitude"] = None
 
-    for i, addr in tqdm(df[address_col].dropna().items(), desc="Geocoding"):
+    addresses = df[address_col].dropna()
+    total = len(addresses)
+
+    # --- GUI Window ---
+    root = tk.Tk()
+    root.title("Geocoding Progress")
+
+    label = tk.Label(root, text=f"Starting geocoding... (0/{total})")
+    label.pack(pady=10)
+
+    progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
+    progress.pack(padx=20, pady=10)
+
+    eta_label = tk.Label(root, text="Estimated time remaining: calculating...")
+    eta_label.pack(pady=5)
+
+    progress["maximum"] = total
+    root.update()
+
+    start_time = time.time()
+
+    for idx, (i, addr) in enumerate(addresses.items(), start=1):
         if pd.notna(df.at[i, "latitude"]) and pd.notna(df.at[i, "longitude"]):
-            continue  # already geocoded
+            continue
+
         loc = geocode(f"{addr}, Toledo, OH")
         if loc:
             df.at[i, "latitude"] = loc.latitude
             df.at[i, "longitude"] = loc.longitude
 
+        # Update progress
+        progress["value"] = idx
+        elapsed = time.time() - start_time
+        avg_time = elapsed / idx
+        remaining = avg_time * (total - idx)
+
+        label.config(text=f"Geocoding {idx}/{total} addresses...")
+        eta_label.config(text=f"Elapsed: {elapsed:.1f}s | Remaining: {remaining:.1f}s")
+
+        root.update_idletasks()
+
+    root.destroy()
     return df
-
-def filter_to_lucas_county(df, lat_col="latitude", lon_col="longitude"):
-    # List layers in the GDB so you can see what's inside
-    layers = fiona.listlayers(GDB_PATH)
-    print("Available layers in GDB:", layers)
-
-    # Pick the county boundary layer (adjust name if different)
-    county = gpd.read_file(GDB_PATH, layer=layers[0])  # try first layer, or replace with correct one
-    county = county.to_crs(epsg=4326)
-
-    # Convert df to GeoDataFrame
-    gdf = gpd.GeoDataFrame(
-        df,
-        geometry=[Point(xy) for xy in zip(df[lon_col], df[lat_col])],
-        crs="EPSG:4326"
-    )
-
-    # Keep only points inside county
-    gdf = gdf[gdf.within(county.unary_union)]
-    return pd.DataFrame(gdf.drop(columns="geometry"))
 
 def safe_popup_text(val, max_len=160):
     if pd.isna(val):
@@ -68,20 +80,27 @@ def safe_popup_text(val, max_len=160):
     s = str(val)
     return (s[:max_len] + "…") if len(s) > max_len else s
 
-def build_map(df, county=None):
-    if county is not None:
-        bounds = county.total_bounds
-        m = folium.Map(tiles="CartoDB positron")
-        m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
-    else:
-        m = folium.Map(location=DEFAULT_CENTER, zoom_start=DEFAULT_ZOOM, tiles="CartoDB positron")
+def build_map(df):
+    m = folium.Map(
+        location=DEFAULT_CENTER,
+        zoom_start=DEFAULT_ZOOM,
+        tiles=None,
+        max_bounds=True,
+        min_zoom=6,
+        max_zoom=17
+    )
 
-    # Heatmap
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="Satellite"
+    ).add_to(m)
+
     points = df[["latitude", "longitude"]].dropna().values.tolist()
     if points:
-        HeatMap(points, radius=12, blur=15, max_zoom=17).add_to(m)
+        HeatMap(points, radius=12, blur=15, max_zoom=17, name="Heatmap").add_to(m)
 
-    # Markers
     cluster = MarkerCluster(name="Incidents").add_to(m)
     for _, row in df.iterrows():
         lat, lon = row["latitude"], row["longitude"]
@@ -105,35 +124,30 @@ def build_map(df, county=None):
     return m
 
 def main():
-    # Adjust header row if needed
-    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME, header=0)
-    df.columns = [c.strip().lower() for c in df.columns]
+    try:
+        df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME, header=0)
+        df.columns = [c.strip().lower() for c in df.columns]
 
-    print("Detected columns:", df.columns.tolist())
+        if "location" not in df.columns:
+            raise ValueError("No 'Location' column found. Check header row in Excel.")
 
-    if "location" not in df.columns:
-        raise ValueError("No 'Location' column found. Check header row in Excel.")
+        df = geocode_addresses(df, address_col="location")
+        df.to_excel(EXCEL_PATH, index=False)
 
-    # Geocode addresses into lat/lon
-    df = geocode_addresses(df, address_col="location")
+        df = df.dropna(subset=["latitude", "longitude"])
+        if df.empty:
+            raise ValueError("No valid coordinates after geocoding.")
 
-    # Save back to Excel so we don’t need to geocode again
-    df.to_excel(EXCEL_PATH, index=False)
-    print(f"Updated Excel with latitude/longitude saved: {EXCEL_PATH}")
+        map_start = time.time()
+        m = build_map(df)
+        m.save(OUTPUT_HTML)
+        map_elapsed = time.time() - map_start
+        print(f"Map built and saved in {map_elapsed:.1f} seconds.")
 
-    # Drop rows without coordinates
-    df = df.dropna(subset=["latitude", "longitude"])
-    if df.empty:
-        raise ValueError("No valid coordinates after geocoding.")
+        messagebox.showinfo("Success", f"✅ Map built successfully!\nSaved to: {OUTPUT_HTML}")
 
-    # Filter to Lucas County
-    df = filter_to_lucas_county(df)
-
-    # Build map
-    county = gpd.read_file(GDB_PATH, layer=fiona.listlayers(GDB_PATH)[0]).to_crs(epsg=4326)
-    m = build_map(df, county=county)
-    m.save(OUTPUT_HTML)
-    print(f"Map built: {OUTPUT_HTML}")
+    except Exception as e:
+        messagebox.showerror("Error", f"❌ Something went wrong:\n{e}")
 
 if __name__ == "__main__":
     main()

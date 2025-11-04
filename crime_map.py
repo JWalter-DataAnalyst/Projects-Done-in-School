@@ -8,11 +8,22 @@ from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import filedialog
 
-# ========= FILES =========
+# This Section Allows Us to Locate A Specific Files
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_PATH = os.path.join(BASE_DIR, "Utoledo Call Log.xlsx")
-OUTPUT_HTML = os.path.join(BASE_DIR, "Utoledo_HeatMap.html")
+EXCEL_PATH = filedialog.askopenfilename(
+    title="Select the Excel file",
+    filetypes=[("Excel files", "*.xlsx")]
+)
+# Get the user's Desktop folder in a cross‑platform way
+DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
+
+# Ensure the Desktop path exists
+if not os.path.isdir(DESKTOP):
+    DESKTOP = os.path.expanduser("~")  # fallback to home directory
+
+OUTPUT_HTML = os.path.join(DESKTOP, "Utoledo_HeatMap.html")
 SHEET_NAME = 0
 # =========================
 
@@ -33,7 +44,7 @@ def geocode_addresses(df, address_col="location"):
     addresses = df[address_col].dropna()
     total = len(addresses)
 
-    # --- GUI Window ---
+    # Creating the GUI Window
     root = tk.Tk()
     root.title("Geocoding Progress")
 
@@ -60,7 +71,7 @@ def geocode_addresses(df, address_col="location"):
             df.at[i, "latitude"] = loc.latitude
             df.at[i, "longitude"] = loc.longitude
 
-        # Update progress
+        # Update progress Bar So User Can See How Long It Will Take
         progress["value"] = idx
         elapsed = time.time() - start_time
         avg_time = elapsed / idx

@@ -1,164 +1,219 @@
 import os
-import math
 import time
+import base64
 import pandas as pd
+import openpyxl
 import folium
-from folium.plugins import HeatMap, MarkerCluster
+from folium.plugins import HeatMap, MarkerCluster, Search
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import tkinter as tk
-from tkinter import ttk, messagebox
-from tkinter import filedialog
+from tkinter import ttk, filedialog, messagebox
 
-# This Section Allows Us to Locate A Specific Files
+#File Selector
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+picker = tk.Tk()
+picker.withdraw()
+
 EXCEL_PATH = filedialog.askopenfilename(
-    title="Select the Excel file",
+    title="Select Crime Excel File",
     filetypes=[("Excel files", "*.xlsx")]
 )
-# Get the user's Desktop folder in a cross‑platform way
+
+if not EXCEL_PATH:
+    raise SystemExit("No file selected.")
+
 DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
-
-# Ensure the Desktop path exists
-if not os.path.isdir(DESKTOP):
-    DESKTOP = os.path.expanduser("~")  # fallback to home directory
-
 OUTPUT_HTML = os.path.join(DESKTOP, "Utoledo_HeatMap.html")
-SHEET_NAME = 0
-# =========================
 
-# ========= MAP =========
-DEFAULT_CENTER = (41.6528, -83.5379)  # Toledo, OH
-DEFAULT_ZOOM = 12
-# =======================
 
-def geocode_addresses(df, address_col="location"):
-    geolocator = Nominatim(user_agent="crime-map")
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
+#Map Settings Generation
+DEFAULT_CENTER = (41.6528, -83.5379)
+DEFAULT_ZOOM = 14
+LOGO_FILE = "UToledo Logo.png"
 
-    if "latitude" not in df.columns:
-        df["latitude"] = None
-    if "longitude" not in df.columns:
-        df["longitude"] = None
-
-    addresses = df[address_col].dropna()
-    total = len(addresses)
-
-    # Creating the GUI Window
-    root = tk.Tk()
-    root.title("Geocoding Progress")
-
-    label = tk.Label(root, text=f"Starting geocoding... (0/{total})")
-    label.pack(pady=10)
-
-    progress = ttk.Progressbar(root, orient="horizontal", length=400, mode="determinate")
-    progress.pack(padx=20, pady=10)
-
-    eta_label = tk.Label(root, text="Estimated time remaining: calculating...")
-    eta_label.pack(pady=5)
-
-    progress["maximum"] = total
-    root.update()
-
-    start_time = time.time()
-
-    for idx, (i, addr) in enumerate(addresses.items(), start=1):
-        if pd.notna(df.at[i, "latitude"]) and pd.notna(df.at[i, "longitude"]):
-            continue
-
-        loc = geocode(f"{addr}, Toledo, OH")
-        if loc:
-            df.at[i, "latitude"] = loc.latitude
-            df.at[i, "longitude"] = loc.longitude
-
-        # Update progress Bar So User Can See How Long It Will Take
-        progress["value"] = idx
-        elapsed = time.time() - start_time
-        avg_time = elapsed / idx
-        remaining = avg_time * (total - idx)
-
-        label.config(text=f"Geocoding {idx}/{total} addresses...")
-        eta_label.config(text=f"Elapsed: {elapsed:.1f}s | Remaining: {remaining:.1f}s")
-
-        root.update_idletasks()
-
-    root.destroy()
+#Data Cleaning for Column Names
+def clean_columns(df):
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace("\n", " ")
+    )
     return df
 
-def safe_popup_text(val, max_len=160):
-    if pd.isna(val):
-        return ""
-    s = str(val)
-    return (s[:max_len] + "…") if len(s) > max_len else s
 
+# Geocoding and Implementation of Progress Bar
+def geocode_addresses(df):
+
+    geolocator = Nominatim(user_agent="utoledo-crime-map")
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+
+    df["latitude"] = None
+    df["longitude"] = None
+
+    unique_locations = df["location"].dropna().unique()
+    total = len(unique_locations)
+
+    #GUI Window
+    root = tk.Tk()
+    root.title("Geocoding Progress")
+    root.geometry("460x140")
+
+    label = tk.Label(root, text="Starting...")
+    label.pack(pady=5)
+
+    progress = ttk.Progressbar(root, length=420, maximum=total)
+    progress.pack(pady=5)
+
+    eta = tk.Label(root)
+    eta.pack()
+
+    root.update()
+
+    lookup = {}
+    start = time.time()
+
+    for i, loc_text in enumerate(unique_locations, start=1):
+
+        result = geocode(f"{loc_text}, Toledo, Ohio")
+
+        if result:
+            lookup[loc_text] = (result.latitude, result.longitude)
+
+        progress["value"] = i
+
+        elapsed = time.time() - start
+        remain = (elapsed / i) * (total - i)
+
+        label.config(text=f"Geocoding {i}/{total}")
+        eta.config(text=f"~ {remain:.1f}s remaining")
+
+        root.update()      # prevents freeze
+        root.after(1)
+
+    root.destroy()
+
+    df["latitude"] = df["location"].map(lambda x: lookup.get(x, (None, None))[0])
+    df["longitude"] = df["location"].map(lambda x: lookup.get(x, (None, None))[1])
+
+    return df
+
+
+#University Logo
+def add_logo(m):
+
+    logo_path = os.path.join(BASE_DIR, LOGO_FILE)
+
+    if not os.path.exists(logo_path):
+        return
+
+    with open(logo_path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+
+    html = f"""
+    <div style="
+        position: fixed;
+        bottom: 10px;
+        left: 10px;
+        z-index: 9999;
+        opacity: 0.85;">
+        <img src="data:image/png;base64,{encoded}" width="150">
+    </div>
+    """
+
+    m.get_root().html.add_child(folium.Element(html))
+
+
+#Creation of the Heatmap
 def build_map(df):
-    m = folium.Map(
-        location=DEFAULT_CENTER,
-        zoom_start=DEFAULT_ZOOM,
-        tiles=None,
-        max_bounds=True,
-        min_zoom=6,
-        max_zoom=17
-    )
 
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    m = folium.Map(location=DEFAULT_CENTER, zoom_start=DEFAULT_ZOOM, tiles=None)
+
+    #Redux Tiles for map framework
+    folium.TileLayer("OpenStreetMap", name="Street (Detailed)").add_to(m)
+
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri World Imagery",
+        attr="Esri",
         name="Satellite"
     ).add_to(m)
 
-    points = df[["latitude", "longitude"]].dropna().values.tolist()
-    if points:
-        HeatMap(points, radius=12, blur=15, max_zoom=17, name="Heatmap").add_to(m)
+    #Clean Coords Throughout Campus
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+    df = df.dropna(subset=["latitude", "longitude"])
 
-    cluster = MarkerCluster(name="Incidents").add_to(m)
+    print("Rows with coords:", len(df))
+
+    #Heatmap Cluster
+    heat_layer = folium.FeatureGroup(name="Heatmap Clusters")
+
+    HeatMap(
+        df[["latitude", "longitude"]].values.tolist(),
+        radius=14,
+        blur=18
+    ).add_to(heat_layer)
+
+    heat_layer.add_to(m)
+
+    #Marker Cluster
+    cluster = MarkerCluster(name="Number of Offenses in Area")
+
     for _, row in df.iterrows():
-        lat, lon = row["latitude"], row["longitude"]
-        if any([pd.isna(lat), pd.isna(lon), not math.isfinite(lat), not math.isfinite(lon)]):
-            continue
 
         popup_html = f"""
-        <b>Report Date:</b> {safe_popup_text(row.get("report date"))}<br>
-        <b>Offense Date:</b> {safe_popup_text(row.get("offense date"))}<br>
-        <b>Offense Time:</b> {safe_popup_text(row.get("offense time"))}<br>
-        <b>Location:</b> {safe_popup_text(row.get("location"))}<br>
-        <b>Disposition:</b> {safe_popup_text(row.get("disposition"))}
+        <b>Location:</b> {row.get('location','')}<br>
+        <b>Report Date:</b> {row.get('report date','')}<br>
+        <b>Offense Time:</b> {row.get('offense time','')}<br>
+        <b>Disposition:</b> {row.get('disposition','')}
         """
+
+        #Text Bar for the Top Left Corner
+        search_text = f"{row.get('location','')} {row.get('disposition','')}"
+
         folium.Marker(
-            location=(lat, lon),
-            popup=folium.Popup(popup_html, max_width=300),
-            icon=folium.Icon(color="red", icon="info-sign")
+            [row["latitude"], row["longitude"]],
+            popup=popup_html,
+            title=search_text
         ).add_to(cluster)
 
-    folium.LayerControl().add_to(m)
+    cluster.add_to(m)
+
+    #Search Bar for Locating Crimes
+    Search(
+        layer=cluster,
+        search_label="title",
+        placeholder="Search building or crime...",
+        collapsed=False
+    ).add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    add_logo(m)
+
     return m
 
+
+#Main
 def main():
-    try:
-        df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME, header=0)
-        df.columns = [c.strip().lower() for c in df.columns]
 
-        if "location" not in df.columns:
-            raise ValueError("No 'Location' column found. Check header row in Excel.")
+    df = pd.read_excel(EXCEL_PATH)
+    df = clean_columns(df)
 
-        df = geocode_addresses(df, address_col="location")
-        df.to_excel(EXCEL_PATH, index=False)
+    if "location" not in df.columns:
+        messagebox.showerror("Error", "No 'Location' column found.")
+        return
 
-        df = df.dropna(subset=["latitude", "longitude"])
-        if df.empty:
-            raise ValueError("No valid coordinates after geocoding.")
+    df = geocode_addresses(df)
 
-        map_start = time.time()
-        m = build_map(df)
-        m.save(OUTPUT_HTML)
-        map_elapsed = time.time() - map_start
-        print(f"Map built and saved in {map_elapsed:.1f} seconds.")
+    m = build_map(df)
 
-        messagebox.showinfo("Success", f"✅ Map built successfully!\nSaved to: {OUTPUT_HTML}")
+    m.save(OUTPUT_HTML)
 
-    except Exception as e:
-        messagebox.showerror("Error", f"❌ Something went wrong:\n{e}")
+    messagebox.showinfo("Done", f"Map saved to:\n{OUTPUT_HTML}")
+
 
 if __name__ == "__main__":
     main()
